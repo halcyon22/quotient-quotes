@@ -2,93 +2,161 @@ var querystring = require("querystring");
 var AWS = require("aws-sdk"),
 	documentClient = new AWS.DynamoDB.DocumentClient();
 
-var categories = {
-    "/quote": undefined,
-    "/chucknorris": "ChuckNorris"
-};
-
 exports.handler = (event, context, callback) => {
     if (event.body === null || event.body === undefined) {
         return errorResponse(callback, "Event body not found");
     }
     
-    if (isDebugMode()) {
-        console.log(event.body);
-    }
+    debugLog(event.body);
     
     let body = querystring.parse(event.body);
     if (body.token !== process.env.APP_TOKEN) {
         return errorResponse(callback, "Invalid app token");
     }
     
-    respondWithQuote(callback, categories[body.command]);
+    let categoryPromise = lookupCategory(body.command)
+    .catch(function(err) {
+        errorResponse(callback, err);
+    });
+
+    let randomQuotePromise = categoryPromise
+    .then(category => loadQuotes(category))
+    .then(allQuotes => filterByLeastUsed(allQuotes))
+    .then(leastUsedQuotes => pickRandomQuote(leastUsedQuotes))
+    .catch(function(err) {
+        errorResponse(callback, err);
+    });
+    
+    randomQuotePromise
+    .then(quote => incrementUsed(quote))
+    .catch(function(err) {
+        errorResponse(callback, err);
+    });
+    
+    Promise.all([categoryPromise, randomQuotePromise])
+    .then(function(resultsArray) {
+        let category = resultsArray[0];
+        let quote = resultsArray[1];
+        respondToSlack(category, quote, callback);
+    })
+    .catch(function(err) {
+        errorResponse(callback, err);
+    });
 };
 
-function respondWithQuote(callback, category) {
-	let params = {
-		TableName: process.env.TABLENAME
-	};
-
-	if (category) {
-	    params.FilterExpression = "#cat = :cat";
-        params.ExpressionAttributeNames = {'#cat': 'category'};
-	    params.ExpressionAttributeValues = {":cat": category};
-	}
-
-    if (isDebugMode()) {
-        console.log(`params=${JSON.stringify(params)}`);
-    }
-
-	documentClient.scan(params, function(err, data) {
-    	if (err) {
-    	    console.error(JSON.stringify(err));
-    	} else {
-    	    if (isDebugMode()) {
-    	        console.log(JSON.stringify(data));
-    	    }
+function lookupCategory(command) {
+    return new Promise(function(resolve, reject) {
+        debugLog(`lookupCategory(${command})`);
+        
+    	let params = {
+    		TableName: process.env.COMMANDS_TABLENAME,
+    	    FilterExpression: "#cmd = :cmd",
+            ExpressionAttributeNames: {'#cmd': 'command'},
+    	    ExpressionAttributeValues: {":cmd": command}
+    	};
+    
+        debugLog(`params=${JSON.stringify(params)}`);
+    	
+    	documentClient.scan(params).promise()
+    	.then(function (data) {
+    	    debugLog(`found ${data.Items.length} items`);
     	    
-    	    if (data.Items && data.Items.length > 0) {
-    	        
-                let leastUsedQuotes = filterByLeastUsed(data.Items);
-                
-                let randomIndex = Math.floor(Math.random() * leastUsedQuotes.length);
-                let randomLeastUsed = leastUsedQuotes[randomIndex];
-                let quote = randomLeastUsed.quote;
-                if (!category) {
-                    quote = `[${randomLeastUsed.category}] ${quote}`;
-                }
-    	        jsonResponse(callback, quote);
-    	        
-    	        incrementUsed(randomLeastUsed);
+    	    if (data.Items.length > 0) {
+    	        resolve(data.Items[0].category);
     	    } else {
-    	        jsonResponse(callback, `No quotes found in category ${category}`);
+    	        reject(`Category not found for ${command}`);
     	    }
+    	});
+    });
+}
+
+function loadQuotes(category) {
+    return new Promise(function(resolve, reject) {
+        debugLog(`loadQuotes(${category})`);
+        
+    	let params = {
+    		TableName: process.env.QUOTES_TABLENAME
+    	};
+    
+    	if (category) {
+    	    params.FilterExpression = "#cat = :cat";
+            params.ExpressionAttributeNames = {'#cat': 'category'};
+    	    params.ExpressionAttributeValues = {":cat": category};
     	}
+    
+        debugLog(`params=${JSON.stringify(params)}`);
+    
+        documentClient.scan(params).promise()
+        .then(function(data) {
+    	    debugLog(`found ${data.Items.length} quotes`);
+    	    
+    	    if (data.Items.length > 0) {
+                resolve(data.Items);
+    	    } else {
+    	        reject(`No quotes found for category: ${category}`);
+    	    }
+        });
     });
 }
 
 function filterByLeastUsed(quotes) {
-    let leastUsedCount = quotes.map(function (quote) {
-        return quote.used ? quote.used : 0;
-    }).reduce(function (previous, current) {
-        if (current < previous) {
-            return current;
-        } else {
-            return previous;
-        }
-    });
+    if (quotes.length < 1) {
+        return quotes;
+    }
     
-    let leastUsedQuotes = quotes.filter(function (quote) {
-       return quote.used == undefined || quote.used == leastUsedCount;
-    });
+    let leastUsedCount = quotes.map(quote =>
+        quote.used ? quote.used : 0
+    ).reduce((previous, current) =>
+        current < previous ? current : previous
+    );
+    
+    let leastUsedQuotes = quotes.filter(quote =>
+       quote.used == undefined || quote.used == leastUsedCount
+    );
+    
+    debugLog(`leastUsed count=${leastUsedQuotes.length}`);
+    
     return leastUsedQuotes;
 }
 
+function pickRandomQuote(quotes) {
+    if (quotes.length < 1) {
+        return undefined;
+    }
+    
+    let randomIndex = Math.floor(Math.random() * quotes.length);
+    let randomLeastUsed = quotes[randomIndex];
+    
+    debugLog(`picked "${JSON.stringify(randomLeastUsed)}"`);
+    return randomLeastUsed;
+}
+
+function respondToSlack(chosenCategory, quote, callback) {
+    debugLog(`chosenCategory=${chosenCategory}`);
+    debugLog(`responding with=${JSON.stringify(quote)}`);
+    
+    if (quote == undefined) {
+        quote = {
+            category: 'N/A',
+            quote: 'No quote found.'
+        };
+    }
+    if (!chosenCategory) {
+        quote = `[${quote.category}] ${quote.quote}`;
+    }
+    jsonResponse(callback, quote.quote);
+}
+
 function incrementUsed(quote) {
+    if (quote == undefined) {
+        return;
+    }
+    debugLog(`quote to increment: ${JSON.stringify(quote)}`);
+    
     let newValue = quote.used ? quote.used + 1 : 1;
     
     let updateparams = {
-        TableName: process.env.TABLENAME,
+        TableName: process.env.QUOTES_TABLENAME,
         Key: {"uuid": quote.uuid},
         UpdateExpression: "set #used = :used",
         ExpressionAttributeNames: {"#used": "used"},
@@ -102,7 +170,7 @@ function incrementUsed(quote) {
     });
 }
 
-function jsonResponse(callback, responseText) {
+function quoteResponse(callback, responseText) {
     let responseBody = {
         "response_type": "in_channel",
         "text": responseText
@@ -115,9 +183,7 @@ function jsonResponse(callback, responseText) {
         body: JSON.stringify(responseBody)
     };
     
-    if (isDebugMode()) {
-        console.log(JSON.stringify(response));
-    }
+    debugLog(JSON.stringify(response));
     
     callback(null, response);
     return;
@@ -136,6 +202,8 @@ function errorResponse(callback, body) {
     return;
 }
 
-function isDebugMode() {
-    return process.env.IS_DEBUG === "true";
+function debugLog(statement) {
+    if (process.env.IS_DEBUG === "true") {
+        console.log(statement);
+    }
 }
