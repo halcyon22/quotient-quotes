@@ -4,53 +4,59 @@ var program = require("commander");
 var Log = require("log"),
     log = new Log("debug");
 var AWS = require("aws-sdk");
-var ddb = new AWS.DynamoDB({ region: "us-east-1", apiVersion: "2012-08-10" });
+var documentClient = new AWS.DynamoDB.DocumentClient({ region: "us-east-1", apiVersion: "2012-08-10" });
 var LineByLineReader = require("line-by-line");
 var uuid = require("uuid");
+var quotesTable = "quotient-quotes";
 
-let categories = {
-    "chuck.txt": "ChuckNorris"
-};
-
+var importfile;
+var category;
 program
-    .arguments("<filename>")
+    .arguments("<filename> <category>")
+    .action(function(inFilename, inCategory) {
+        importfile = inFilename;
+        category = inCategory;
+    })
     .parse(process.argv);
 
 if (!program.args[0]) {
     program.outputHelp();
     process.exit();
 }
-let importfile = program.args[0];
 
-log.info(`Importing ${importfile}`);
+log.info(`Importing ${importfile} to category ${category}`);
 
-let lr = new LineByLineReader(importfile);
+let lr = new LineByLineReader(importfile, {
+    skipEmptyLines: true
+});
 
 lr.on("error", function (err) {
     log.error(`ERROR! ${err}`, err.stack);
     process.exit();
 });
 
-let batchSize = 25;
+let total = 0;
+let batchSize = 20;
 let params = emptyParams();
 lr.on("line", function (line) {
     // log.debug(line);
 
-    params.RequestItems["quotient-quotes"].push({
+    params.RequestItems[quotesTable].push({
         PutRequest: {
             Item: {
-                "uuid": { "S": uuid.v4() },
-                "category": { "S": categories[importfile] },
-                "quote": { "S": line }
+                "uuid": uuid.v4(),
+                "category": category,
+                "quote": line
             }
         }
     });
 
-    let batchCount = params.RequestItems["quotient-quotes"].length;
+    let batchCount = params.RequestItems[quotesTable].length;
     if (batchCount >= batchSize) {
         log.info(`Sending ${batchCount} items`);
+        total += batchCount;
 
-        ddb.batchWriteItem(params, function (err, data) {
+        documentClient.batchWrite(params, function (err, data) {
             if (err) {
                 log.error(`ERROR! ${err}`, err.stack);
                 process.exit();
@@ -65,11 +71,12 @@ lr.on("line", function (line) {
 
 lr.on("end", function () {
 
-    let batchCount = params.RequestItems["quotient-quotes"].length;
+    let batchCount = params.RequestItems[quotesTable].length;
     if (batchCount > 0) {
         log.info(`Ending with ${batchCount} items`);
+        total += batchCount;
 
-        ddb.batchWriteItem(params, function (err, data) {
+        documentClient.batchWrite(params, function (err, data) {
             if (err) {
                 log.error(`ERROR! ${err}`, err.stack);
                 process.exit();
@@ -81,13 +88,28 @@ lr.on("end", function () {
         params = emptyParams();
     }
     
+    if (total > 0) {
+        params = {
+            TableName: "quotient-commands",
+            Key: {"command": `/${category.toLowerCase()}`},
+            UpdateExpression: "set #cat = :cat",
+            ExpressionAttributeNames: {"#cat": "category"},
+            ExpressionAttributeValues: {":cat": category}
+        };
+
+        documentClient.update(params, function(err, data) {
+            if (err) {
+                log.error("Unable to update: ", JSON.stringify(err, null, 2));
+            }
+        });
+    }
+
 });
 
 function emptyParams() {
-    return {
-        RequestItems: {
-            "quotient-quotes": [
-            ]
-        }
+    let p = {
+        RequestItems: {}
     };
+    p.RequestItems[quotesTable] = [];
+    return p;
 }
