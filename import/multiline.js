@@ -4,16 +4,18 @@ var program = require("commander");
 var Log = require("log"),
     log = new Log("debug");
 var AWS = require("aws-sdk");
-var documentClient = new AWS.DynamoDB.DocumentClient({ region: "us-east-1", apiVersion: "2012-08-10" });
 var LineByLineReader = require("line-by-line");
 var uuid = require("uuid");
-var quotesTable = "quotient-quotes";
+var quotesTable = "quotes";
+var commandsTable = "commands";
 
+var awsRegion;
 var importfile;
 var category;
 program
-    .arguments("<filename> <category>")
-    .action(function(inFilename, inCategory) {
+    .arguments("<aws region> <filename> <category>")
+    .action(function(inRegion, inFilename, inCategory) {
+	awsRegion = inRegion;
         importfile = inFilename;
         category = inCategory;
     })
@@ -25,6 +27,8 @@ if (!program.args[0]) {
 }
 
 log.info(`Importing ${importfile} to category ${category}`);
+
+var documentClient = new AWS.DynamoDB.DocumentClient({ region: awsRegion, apiVersion: "2012-08-10" });
 
 let lr = new LineByLineReader(importfile, {
     skipEmptyLines: true
@@ -98,7 +102,7 @@ lr.on("end", function () {
 
     if (total > 0) {
         params = {
-            TableName: "quotient-commands",
+            TableName: commandsTable,
             Key: {"command": `/${category.toLowerCase()}`},
             UpdateExpression: "set #cat = :cat",
             ExpressionAttributeNames: {"#cat": "category"},

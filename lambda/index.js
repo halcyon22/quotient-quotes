@@ -11,7 +11,7 @@ exports.handler = (event, context, callback) => {
     
     let body = querystring.parse(event.body);
     if (body.token !== process.env.APP_TOKEN) {
-        return errorResponse(callback, "Invalid app token");
+        return errorResponse(callback, `Invalid app token: ${body.token}`);
     }
     
     let categoryPromise = lookupCategory(body.command)
@@ -144,7 +144,7 @@ function respondToSlack(chosenCategory, quote, callback) {
     if (!chosenCategory) {
         quote = `[${quote.category}] ${quote.quote}`;
     }
-    jsonResponse(callback, quote.quote);
+    quoteResponse(callback, quote.quote);
 }
 
 function incrementUsed(quote) {
