@@ -2,7 +2,7 @@
 A simple quote bot for Slack built with AWS Lambda and DynamoDB.
 
 ## Lambda Function
-`lambda/index.js` has been tested with Node.js 6.10 and 8.10.
+`lambda/index.js` has been tested with Node.js 10.x and 12.x.
 
 1. Create a function from scratch.
 1. Choose a Node.js runtime.
